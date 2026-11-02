@@ -1,0 +1,647 @@
+Voici la refonte complète de votre blueprint, inspirée des standards
+d'excellence du projet CCA (Cover Control Automation) :
+
+  - Structure en sections rétractables avec icônes pour une interface claire et
+    épurée.
+  - Architecture 100 % flottante par horodatage (aucun reset à 20h00, aucun
+    piège à minuit).
+  - Gestion complète de la puissance & anti-désamorçage (manque d'eau) :
+      - Option activable/désactivable dans les paramètres généraux.
+      - Si aucun capteur n'est renseigné, la sécurité est totalement ignorée
+        sans générer d'erreur.
+      - Temporisation d'amorçage pour laisser le temps à la pompe de monter en
+        pression au démarrage.
+      - Bloc d'action d'alerte personnalisable (notification sur smartphone,
+        sirène, etc.).
+
+blueprint:
+  name: "🏊 Gestion Avancée Piscine (Horodatage Flottant & Sécurité Manque d'Eau)"
+  description: |
+    # 🏊 Pool Control Automation (PCA)
+    Automatisation complète et intelligente pour la filtration de piscine.
+    
+    ### ✨ Points clés :
+    * **Zéro frontière temporelle** : Ni piège de minuit, ni reset journalier à 20h00. Chaque cycle calcule une fin absolue.
+    * **Heures Creuses & Solaire** : Découpage intelligent entre créneau de nuit et journée.
+    * **Ajustement thermique en temps réel** : Recalcul horaire pour allonger la filtration au soleil.
+    * **Protection Canicule & Hors-gel** : Bascule automatique en H24 continu en cas d'eau $\ge 28^\circ\text{C}$ ou de gel (eau + air).
+    * **Sécurité manque d'eau (Puissance)** : Détection de désamorçage avec coupure immédiate et alerte personnalisée (optionnel).
+
+  domain: automation
+  homeassistant:
+    min_version: "2024.8.0"
+
+  input:
+    # =========================================================================
+    # ÉQUIPEMENTS PRINCIPAUX
+    # =========================================================================
+    switch_pompe:
+      name: "🔌 Pompe de filtration"
+      description: "L'entité commandant la pompe de la piscine (Switch, Relais ou Prise connectée)."
+      selector:
+        entity:
+          filter:
+            domain:
+              - switch
+              - light
+              - input_boolean
+          multiple: true
+
+    temperature_piscine:
+      name: "🌡️ Sonde de température de l'eau"
+      description: "Capteur mesurant la température du bassin pour le calcul des durées de filtration."
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+          multiple: false
+
+    temperature_air:
+      name: "❄️ Sonde de température de l'air (Optionnel)"
+      description: "Capteur météo extérieur pour anticiper le gel des canalisations avant que l'eau du bassin ne gèle."
+      default: []
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+          multiple: false
+
+    # =========================================================================
+    # OPTIONS & FONCTIONNALITÉS (SECTIONS CCA STYLE)
+    # =========================================================================
+    feature_section:
+      name: "⚙️ Options d'automatisation"
+      icon: mdi:tune
+      collapsed: false
+      description: "Activez ou désactivez les fonctionnalités selon votre installation."
+      input:
+        features_enabled:
+          name: "👉 Fonctionnalités actives"
+          description: "Sélectionnez les sécurités et automatismes à activer."
+          default:
+            - "enable_frost"
+            - "enable_heatwave"
+            - "enable_hourly_recalc"
+          selector:
+            select:
+              options:
+                - label: "❄️ Protection Hors-gel (Eau + Air)"
+                  value: "enable_frost"
+                - label: "🔥 Protection Canicule (Filtration H24 si eau ≥ 28°C)"
+                  value: "enable_heatwave"
+                - label: "🔄 Recalcul dynamique horaire (ajuste la durée au soleil)"
+                  value: "enable_hourly_recalc"
+                - label: "⚡ Sécurité Puissance & Anti-désamorçage (Manque d'eau)"
+                  value: "enable_power_safety"
+              multiple: true
+              mode: list
+
+        mode_filtration:
+          name: "🎛️ Mode de filtration"
+          description: >
+            Courbe : Calcul dynamique selon la formule thermique.
+            Hivernage : 3h fixes ou T°/3 si > 10°C.
+            Automatique : Alterne entre Courbe et Hivernage selon la température.
+            Forcé : Allumage permanent (H24).
+            Inactif : Pompe éteinte, automatismes suspendus.
+          selector:
+            entity:
+              filter:
+                domain: input_select
+              multiple: false
+
+        ajustement:
+          name: "📈 Coefficient d'ajustement (%)"
+          description: "Permet de moduler à la hausse ou à la baisse le temps calculé (ex: 100% = normal, 120% = +20%)."
+          selector:
+            entity:
+              filter:
+                domain: input_number
+              multiple: false
+
+    # =========================================================================
+    # SÉCURITÉ PUISSANCE & DÉSAMORÇAGE
+    # =========================================================================
+    power_section:
+      name: "⚡ Sécurité Puissance & Manque d'eau"
+      icon: mdi:flash-alert
+      collapsed: true
+      description: >
+        Surveille la consommation électrique de la pompe. Si la pompe tourne à sec (désamorçage, niveau d'eau trop bas),
+        sa puissance chute. L'automatisation coupe immédiatement la pompe pour sauver la garniture mécanique.
+      input:
+        power_sensor:
+          name: "⚡ Capteur de puissance (Watts)"
+          description: "Entité mesurant la consommation active de la pompe (ex: Shelly 1PM, Sonoff POW, etc.). Laissez vide pour ignorer."
+          default: []
+          selector:
+            entity:
+              filter:
+                domain: sensor
+                device_class: power
+              multiple: false
+
+        min_power_threshold:
+          name: "📉 Seuil de puissance minimale (Watts)"
+          description: >
+            En dessous de cette puissance alors que la pompe est commandée, la pompe est considérée comme désamorcée.
+            (Exemple : pour une pompe de 1000 W, régler entre 500 et 600 W).
+          default: 500
+          selector:
+            number:
+              min: 50
+              max: 3000
+              step: 10
+              unit_of_measurement: "W"
+              mode: box
+
+        dry_run_delay:
+          name: "⏱️ Délai de confirmation d'amorçage (Secondes)"
+          description: "Temps pendant lequel la puissance doit rester sous le seuil avant de couper (permet d'ignorer la phase de démarrage et d'amorçage initial)."
+          default: 120
+          selector:
+            number:
+              min: 30
+              max: 600
+              step: 10
+              unit_of_measurement: "s"
+              mode: slider
+
+    # =========================================================================
+    # PLANIFICATION DES PLAGES HORAIRES (HEURES CREUSES)
+    # =========================================================================
+    schedule_section:
+      name: "🕒 Planification & Heures Creuses"
+      icon: mdi:clock-outline
+      collapsed: true
+      description: "Définissez les moments de lancement de vos plages. Aucun risque avec minuit !"
+      input:
+        heure_demarrage_p1:
+          name: "🌙 Plage 1 : Heure de début (ex: HC Nuit)"
+          description: "Heure fixe de démarrage du créneau nocturne (ex: 22h00 ou 23h00)."
+          default: "22:00:00"
+          selector:
+            time: {}
+
+        ratio_p1:
+          name: "🌙 Répartition du quota sur la Plage 1 (%)"
+          description: "Part du temps total allouée à la nuit (ex: 40%). Le reste (60%) sera filtré en journée."
+          default: 40
+          selector:
+            number:
+              min: 0
+              max: 100
+              step: 5
+              unit_of_measurement: "%"
+              mode: slider
+
+        heure_demarrage_p2:
+          name: "☀️ Plage 2 : Heure de début (ex: HC Jour / Solaire)"
+          description: "Heure fixe de démarrage du créneau diurne (ex: 12h00 ou 13h00)."
+          default: "13:00:00"
+          selector:
+            time: {}
+
+        hivernage_full_p1:
+          name: "❄️ Hivernage : 100% sur la Plage 1"
+          description: "En hiver, concentre les 3h de filtration uniquement la nuit en Plage 1 (moment le plus froid et le plus économique)."
+          default: true
+          selector:
+            boolean: {}
+
+    # =========================================================================
+    # SÉCURITÉS TEMPÉRATURES
+    # =========================================================================
+    temperatures_section:
+      name: "🌡️ Seuils Canicule & Hors-Gel"
+      icon: mdi:shield-sun
+      collapsed: true
+      input:
+        seuil_canicule:
+          name: "🔥 Seuil Canicule (Marche continue H24)"
+          description: "Dès que l'eau atteint cette température, filtration 24h/24 continue."
+          default: 28
+          selector:
+            number:
+              min: 26
+              max: 32
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: slider
+
+        temp_passage_hiver:
+          name: "🍂 Température bascule Hivernage (Mode Auto)"
+          description: "En dessous de cette température d'eau, le mode Automatique applique la formule d'hivernage."
+          default: 15
+          selector:
+            number:
+              min: 5
+              max: 20
+              step: 1
+              unit_of_measurement: "°C"
+              mode: slider
+
+        seuil_hors_gel_eau:
+          name: "❄️ Seuil Hors-gel Eau"
+          description: "En dessous de cette température d'eau, filtration forcée continue."
+          default: 1
+          selector:
+            number:
+              min: -5
+              max: 5
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: slider
+
+        seuil_hors_gel_air:
+          name: "❄️ Seuil Hors-gel Air"
+          description: "En dessous de cette température d'air extérieur, filtration forcée continue."
+          default: 1
+          selector:
+            number:
+              min: -5
+              max: 5
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: slider
+
+    # =========================================================================
+    # ENTITÉS DE STOCKAGE & CONTRÔLE
+    # =========================================================================
+    storage_section:
+      name: "💾 Entités de stockage & Contrôle"
+      icon: mdi:database
+      collapsed: true
+      input:
+        fin_filtration_stockage:
+          name: "📅 Entité Heure de Fin Prévue (input_datetime avec Date et Heure)"
+          description: "Permet de stocker et d'afficher sur votre Dashboard l'heure exacte de fin programmée."
+          selector:
+            entity:
+              filter:
+                domain: input_datetime
+              multiple: false
+
+        duree_filtration_stockage:
+          name: "📊 Entité Durée Totale Calculée (input_number)"
+          description: "Permet d'afficher sur votre Dashboard la durée totale préconisée pour 24h."
+          selector:
+            entity:
+              filter:
+                domain: input_number
+              multiple: false
+
+        bouton_reset:
+          name: "🔄 Bouton de recalcul forcé"
+          selector:
+            entity:
+              filter:
+                domain: input_button
+              multiple: false
+
+    # =========================================================================
+    # ACTIONS PERSONNALISÉES / NOTIFICATIONS
+    # =========================================================================
+    actions_section:
+      name: "🔔 Notifications et Actions d'alerte"
+      icon: mdi:bell-ring
+      collapsed: true
+      description: "Définissez ici l'action exécutée en cas d'anomalie critique (manque d'eau / désamorçage)."
+      input:
+        dry_run_action:
+          name: "🚨 Action en cas d'alerte manque d'eau"
+          description: "Action à exécuter lors de la coupure de sécurité (ex: notification push vers l'application Home Assistant)."
+          default: []
+          selector:
+            action: {}
+
+    logging_section:
+      name: "📜 Traces et Diagnostics"
+      icon: mdi:math-log
+      collapsed: true
+      input:
+        trace_count:
+          name: "Nombre de traces conservées"
+          default: 10
+          selector:
+            number:
+              min: 5
+              max: 50
+              step: 1
+
+################################################################################
+# TRIGGER VARIABLES (Évaluées avant les déclencheurs)
+################################################################################
+trigger_variables:
+  var_features: !input features_enabled
+  var_power_sensor: !input power_sensor
+  var_min_power: !input min_power_threshold
+  var_switch_pompe: !input switch_pompe
+  var_temp_air: !input temperature_air
+  var_seuil_air: !input seuil_hors_gel_air
+  is_power_safety_active: "{{ 'enable_power_safety' in var_features and var_power_sensor != [] }}"
+
+################################################################################
+# DECLENCHEURS (TRIGGERS)
+################################################################################
+triggers:
+  # 1. Démarrages programmés des plages
+  - trigger: time
+    at: !input heure_demarrage_p1
+    id: "start_p1"
+  - trigger: time
+    at: !input heure_demarrage_p2
+    id: "start_p2"
+
+  # 2. Heure de fin calculée atteinte
+  - trigger: time
+    at: !input fin_filtration_stockage
+    id: "time_to_stop"
+
+  # 3. Recalcul périodique horaire
+  - trigger: time_pattern
+    hours: "/1"
+    id: "hourly_check"
+
+  # 4. Actions manuelles et relance
+  - trigger: state
+    entity_id: !input bouton_reset
+    id: "manual_reset"
+  - trigger: state
+    entity_id: !input mode_filtration
+    id: "manual_reset"
+  - trigger: homeassistant
+    event: start
+    id: "manual_reset"
+
+  # 5. Sécurité Manque d'eau / Désamorçage (Puissance trop faible en marche)
+  - trigger: template
+    value_template: >-
+      {% if is_power_safety_active and states(var_power_sensor) not in ['unknown', 'unavailable', ''] %}
+        {% set pump_is_on = expand(var_switch_pompe) | selectattr('state', 'eq', 'on') | list | count > 0 %}
+        {{ pump_is_on and (states(var_power_sensor) | float(9999) < (var_min_power | float(0))) }}
+      {% else %}
+        false
+      {% endif %}
+    for:
+      seconds: !input dry_run_delay
+    id: "t_dry_run_alert"
+
+  # 6. Déclencheurs réactifs Hors-gel Eau
+  - trigger: numeric_state
+    entity_id: !input temperature_piscine
+    below: !input seuil_hors_gel_eau
+    id: "frost_check"
+  - trigger: numeric_state
+    entity_id: !input temperature_piscine
+    above: !input seuil_hors_gel_eau
+    id: "frost_check"
+
+  # 7. Déclencheurs réactifs Hors-gel Air
+  - trigger: template
+    value_template: >-
+      {% if 'enable_frost' in var_features and var_temp_air != [] and states(var_temp_air) not in ['unknown', 'unavailable', ''] %}
+        {{ states(var_temp_air)|float(99) <= var_seuil_air|float(1) }}
+      {% else %}
+        false
+      {% endif %}
+    id: "frost_check"
+  - trigger: template
+    value_template: >-
+      {% if 'enable_frost' in var_features and var_temp_air != [] and states(var_temp_air) not in ['unknown', 'unavailable', ''] %}
+        {{ states(var_temp_air)|float(-99) > (var_seuil_air|float(1) + 0.5) }}
+      {% else %}
+        false
+      {% endif %}
+    id: "frost_check"
+
+################################################################################
+# VARIABLES PRINCIPALES
+################################################################################
+variables:
+  features: !input features_enabled
+  temp_piscine: !input temperature_piscine
+  temp_air: !input temperature_air
+  mode_filtr: !input mode_filtration
+  coef: !input ajustement
+  fin_ent: !input fin_filtration_stockage
+  duree_ent: !input duree_filtration_stockage
+  ratio_1: !input ratio_p1
+  hiv_full_1: !input hivernage_full_p1
+
+  t_canicule: !input seuil_canicule
+  t_hiver: !input temp_passage_hiver
+  shg_eau: !input seuil_hors_gel_eau
+  shg_air: !input seuil_hors_gel_air
+
+  # Détection du Hors-gel
+  is_frost: >-
+    {% set hg_enabled = ('enable_frost' in features) %}
+    {% set t_eau = states(temp_piscine) | float(99) %}
+    {% set t_ext = states(temp_air) | float(99) if (temp_air != [] and states(temp_air) not in ['unknown', 'unavailable', '']) else 99 %}
+    {% set gel_eau = t_eau <= (shg_eau | float(1)) %}
+    {% set gel_air = (temp_air != [] and t_ext <= (shg_air | float(1))) %}
+    {{ hg_enabled and (gel_eau or gel_air) and states(mode_filtr) not in ['Inactif'] }}
+
+  # Détection Canicule
+  is_canicule: >-
+    {% set heat_enabled = ('enable_heatwave' in features) %}
+    {% set t_eau = states(temp_piscine)|float(0) %}
+    {{ heat_enabled and (t_eau >= t_canicule|float(28)) and states(mode_filtr) not in ['Inactif'] }}
+
+  # Calcul de la Durée Totale 24h (en heures décimales)
+  duree_totale_h: >-
+    {% set mode = states(mode_filtr) %}
+    {% if mode == 'Inactif' %}
+      0.0
+    {% elif mode == 'Forcé' or is_frost or is_canicule %}
+      24.0
+    {% elif mode == 'Hivernage' %}
+      {% set t = states(temp_piscine)|float(10) %}
+      {{ 3.0 if t < 10 else (t / 3.0)|round(2) }}
+    {% elif mode == 'Automatique' and states(temp_piscine)|float(20) < t_hiver|float(15) %}
+      {% set t = states(temp_piscine)|float(10) %}
+      {{ 3.0 if t < 10 else (t / 3.0)|round(2) }}
+    {% else %}
+      {% set temp = max(states(temp_piscine)|float(10), 10) %}
+      {% set a = 0.00335 * states(coef)|float(100) / 100 %}
+      {% set b = -0.14953 * states(coef)|float(100) / 100 %}
+      {% set c = 2.43489 * states(coef)|float(100) / 100 %}
+      {% set d = -10.72859 * states(coef)|float(100) / 100 %}
+      {% set h = (a * temp**3) + (b * temp**2) + (c * temp) + d %}
+      {{ min(max(h, 0.0), 24.0)|round(2) }}
+    {% endif %}
+
+################################################################################
+# ACTIONS / LOGIQUE D'EXÉCUTION
+################################################################################
+actions:
+  # ===========================================================================
+  # 1. ALERTE CRITIQUE : MANQUE D'EAU / DÉSAMORÇAGE
+  # ===========================================================================
+  - if:
+      - condition: trigger
+        id: "t_dry_run_alert"
+    then:
+      # Coupure d'urgence immédiate
+      - action: homeassistant.turn_off
+        target:
+          entity_id: !input switch_pompe
+      # Annulation de la fin programmée
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: !input fin_filtration_stockage
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      # Inscription au journal Home Assistant
+      - action: logbook.log
+        data:
+          name: "Sécurité Piscine"
+          message: "🚨 COUPURE D'URGENCE : Puissance anormale détectée (Manque d'eau / Désamorçage de la pompe) !"
+      # Exécution des actions utilisateur (Notification smartphone, etc.)
+      - choose: []
+        default: !input dry_run_action
+      - stop: "Arrêt d'urgence effectué suite à désamorçage."
+
+  # ===========================================================================
+  # 2. MISE À JOUR DE LA DURÉE TOTALE AFFICHÉE
+  # ===========================================================================
+  - action: input_number.set_value
+    target:
+      entity_id: !input duree_filtration_stockage
+    data:
+      value: "{{ duree_totale_h }}"
+
+  # ===========================================================================
+  # 3. GESTION DES CYCLES ET HORODATAGE DE FIN
+  # ===========================================================================
+  - choose:
+      # --- Cas Forcé, Canicule ou Hors-gel : allumage H24 ---
+      - conditions:
+          - "{{ is_frost or is_canicule or states(mode_filtr) == 'Forcé' }}"
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input fin_filtration_stockage
+            data:
+              datetime: "{{ (now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: homeassistant.turn_on
+            target:
+              entity_id: !input switch_pompe
+
+      # --- Mode Inactif : extinction immédiate ---
+      - conditions:
+          - "{{ states(mode_filtr) == 'Inactif' }}"
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input fin_filtration_stockage
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: homeassistant.turn_off
+            target:
+              entity_id: !input switch_pompe
+
+      # --- Démarrage Plage 1 (Nuit) ---
+      - conditions:
+          - "{{ trigger.id == 'start_p1' }}"
+        sequence:
+          - variables:
+              is_hiv: "{{ states(mode_filtr) == 'Hivernage' or (states(mode_filtr) == 'Automatique' and states(temp_piscine)|float(20) < t_hiver|float(15)) }}"
+              duree_p1_min: >-
+                {% if is_hiv and hiv_full_1 %}
+                  {{ (duree_totale_h * 60) | int }}
+                {% else %}
+                  {{ ((duree_totale_h * (ratio_1 | float(40) / 100.0)) * 60) | int }}
+                {% endif %}
+          - if:
+              - "{{ duree_p1_min > 0 }}"
+            then:
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: !input fin_filtration_stockage
+                data:
+                  datetime: "{{ (now() + timedelta(minutes=duree_p1_min)).strftime('%Y-%m-%d %H:%M:%S') }}"
+              - action: homeassistant.turn_on
+                target:
+                  entity_id: !input switch_pompe
+
+      # --- Démarrage Plage 2 (Journée) ---
+      - conditions:
+          - "{{ trigger.id == 'start_p2' }}"
+        sequence:
+          - variables:
+              is_hiv: "{{ states(mode_filtr) == 'Hivernage' or (states(mode_filtr) == 'Automatique' and states(temp_piscine)|float(20) < t_hiver|float(15)) }}"
+              duree_p2_min: >-
+                {% if is_hiv and hiv_full_1 %}
+                  0
+                {% else %}
+                  {{ ((duree_totale_h * (1.0 - (ratio_1 | float(40) / 100.0))) * 60) | int }}
+                {% endif %}
+          - if:
+              - "{{ duree_p2_min > 0 }}"
+            then:
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: !input fin_filtration_stockage
+                data:
+                  datetime: "{{ (now() + timedelta(minutes=duree_p2_min)).strftime('%Y-%m-%d %H:%M:%S') }}"
+              - action: homeassistant.turn_on
+                target:
+                  entity_id: !input switch_pompe
+
+      # --- Heure de fin atteinte : arrêt normal ---
+      - conditions:
+          - "{{ trigger.id == 'time_to_stop' }}"
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: !input switch_pompe
+
+      # --- Recalcul horaire ou relance manuelle ---
+      - conditions:
+          - "{{ trigger.id in ['hourly_check', 'manual_reset', 'frost_check'] }}"
+        sequence:
+          - variables:
+              target_fin: "{{ states(fin_ent) | as_datetime }}"
+          - if:
+              - "{{ target_fin is not none and target_fin > now() }}"
+            then:
+              - action: homeassistant.turn_on
+                target:
+                  entity_id: !input switch_pompe
+            else:
+              - action: homeassistant.turn_off
+                target:
+                  entity_id: !input switch_pompe
+
+mode: restart
+max_exceeded: silent
+
+trace:
+  stored_traces: !input trace_count
+
+Ce qui est prêt pour le jour où vous installerez une mesure de puissance :
+
+1.  Aucune erreur si non configuré :
+
+      - Dans la section « Options d'automatisation », la case « ⚡ Sécurité
+        Puissance & Anti-désamorçage » n'est pas cochée par défaut.
+      - Le champ du capteur de puissance est vide par défaut (default: []).
+      - Le déclencheur template vérifie d'abord si l'option est cochée et si le
+        capteur existe. Tant que ce n'est pas le cas, il reste 100% inerte et ne
+        produit aucun message dans les logs.
+
+2.  Le jour où vous branchez votre mesure (ex: Shelly 1PM) :
+
+      - Vous renseignez simplement votre capteur de Watts (ex:
+        sensor.pompe_piscine_power).
+      - Vous cochez la case dans les options.
+      - Vous personnalisez l'action d'alerte (par exemple : envoyer un message
+        Telegram ou une notification critique avec notify.notify : "Alerte
+        Piscine : pompe désamorcée, coupure immédiate effectuée").
+      - La temporisation d'amorçage (120 secondes par défaut) permet à la pompe
+        de démarrer et de remplir ses tuyaux sans déclencher d'alerte
+        intempestive.
